@@ -5,6 +5,7 @@ from typing import Tuple, Optional
 from dataclasses import dataclass
 from skimage.metrics import structural_similarity as ssim
 from sklearn.metrics import pairwise_distances
+from scipy.spatial.distance import cosine
 import logging
 
 # Configure logging
@@ -16,27 +17,37 @@ app = Flask(__name__)
 @dataclass
 class SignatureMatchingConfig:
     """Configuration parameters for signature matching"""
-    MIN_FEATURE_SCORE: float = 15.0
-    MIN_MATCHES: int = 15
+    MIN_FEATURE_SCORE: float = 20.0
+    MIN_MATCHES: int = 20
     ORB_FEATURES: int = 5000
-    DISTANCE_THRESHOLD: float = 50.0
-    FEATURE_WEIGHT: float = 0.4
-    TEMPLATE_WEIGHT: float = 0.3
+    DISTANCE_THRESHOLD: float = 30.0
+    FEATURE_WEIGHT: float = 0.3
+    TEMPLATE_WEIGHT: float = 0.2
     SSIM_WEIGHT: float = 0.3
+    HISTOGRAM_WEIGHT: float = 0.2
     TARGET_SIZE: Tuple[int, int] = (300, 150)
 
 class SignatureMatcher:
     def __init__(self, config: SignatureMatchingConfig):
         self.config = config
         self.orb = cv2.ORB_create(nfeatures=config.ORB_FEATURES)
-        self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+        self.bf = cv2.BFMatcher(cv2.NORM_HAMMING)
 
     def preprocess_image(self, image: np.ndarray) -> np.ndarray:
         """Preprocess the image for better feature detection"""
         try:
+            # Convert to grayscale
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            edges = cv2.Canny(gray, 100, 200)  # Edge detection
+            
+            # Apply Gaussian Blur
+            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+            
+            # Apply edge detection
+            edges = cv2.Canny(blurred, 50, 150)
+            
+            # Resize to target size
             resized = cv2.resize(edges, self.config.TARGET_SIZE)
+            
             return resized
         except Exception as e:
             logger.error(f"Error in image preprocessing: {str(e)}")
@@ -83,15 +94,15 @@ class SignatureMatcher:
             logger.error(f"Error in SSIM calculation: {str(e)}")
             return 0.0
 
-    def calculate_histogram_score(self, img1: np.ndarray, img2: np.ndarray) -> float:
-        """Calculate histogram similarity score to reduce false positives"""
+    def calculate_histogram_similarity(self, img1: np.ndarray, img2: np.ndarray) -> float:
+        """Calculate histogram similarity score"""
         try:
             hist1 = cv2.calcHist([img1], [0], None, [256], [0, 256]).flatten()
             hist2 = cv2.calcHist([img2], [0], None, [256], [0, 256]).flatten()
             hist1 = hist1 / np.sum(hist1)
             hist2 = hist2 / np.sum(hist2)
-            dist = pairwise_distances([hist1], [hist2], metric="cosine")[0][0]
-            return (1 - dist) * 100
+            cosine_similarity = 1 - cosine(hist1, hist2)
+            return cosine_similarity * 100
         except Exception as e:
             logger.error(f"Error in histogram similarity calculation: {str(e)}")
             return 0.0
@@ -99,22 +110,25 @@ class SignatureMatcher:
     def match_signatures(self, img1: np.ndarray, img2: np.ndarray) -> float:
         """Calculate overall signature matching score"""
         try:
+            # Preprocess images
             proc_img1 = self.preprocess_image(img1)
             proc_img2 = self.preprocess_image(img2)
 
+            # Calculate individual scores
             feature_score = self.calculate_feature_score(proc_img1, proc_img2)
             template_score = self.calculate_template_score(proc_img1, proc_img2)
             ssim_score = self.calculate_ssim_score(proc_img1, proc_img2)
-            histogram_score = self.calculate_histogram_score(proc_img1, proc_img2)
+            histogram_score = self.calculate_histogram_similarity(proc_img1, proc_img2)
 
             if feature_score < self.config.MIN_FEATURE_SCORE:
                 return 0.0
 
+            # Calculate combined score
             combined_score = (
                 self.config.FEATURE_WEIGHT * feature_score +
                 self.config.TEMPLATE_WEIGHT * template_score +
                 self.config.SSIM_WEIGHT * ssim_score +
-                0.2 * histogram_score  # Additional weight for histogram matching
+                self.config.HISTOGRAM_WEIGHT * histogram_score
             )
 
             return min(combined_score, 100)
