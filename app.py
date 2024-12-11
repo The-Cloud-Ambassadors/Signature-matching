@@ -4,8 +4,6 @@ import numpy as np
 from typing import Tuple, Optional
 from dataclasses import dataclass
 from skimage.metrics import structural_similarity as ssim
-from sklearn.metrics import pairwise_distances
-from scipy.spatial.distance import cosine
 import logging
 
 # Configure logging
@@ -17,14 +15,14 @@ app = Flask(__name__)
 @dataclass
 class SignatureMatchingConfig:
     """Configuration parameters for signature matching"""
-    MIN_FEATURE_SCORE: float = 20.0
-    MIN_MATCHES: int = 20
-    ORB_FEATURES: int = 5000
-    DISTANCE_THRESHOLD: float = 30.0
-    FEATURE_WEIGHT: float = 0.3
-    TEMPLATE_WEIGHT: float = 0.2
+    MIN_FEATURE_SCORE: float = 30.0
+    MIN_MATCHES: int = 25
+    ORB_FEATURES: int = 4000
+    DISTANCE_THRESHOLD: float = 40.0
+    FEATURE_WEIGHT: float = 0.4
     SSIM_WEIGHT: float = 0.3
     HISTOGRAM_WEIGHT: float = 0.2
+    TEMPLATE_WEIGHT: float = 0.1
     TARGET_SIZE: Tuple[int, int] = (300, 150)
 
 class SignatureMatcher:
@@ -36,18 +34,10 @@ class SignatureMatcher:
     def preprocess_image(self, image: np.ndarray) -> np.ndarray:
         """Preprocess the image for better feature detection"""
         try:
-            # Convert to grayscale
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            
-            # Apply Gaussian Blur
             blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-            
-            # Apply edge detection
             edges = cv2.Canny(blurred, 50, 150)
-            
-            # Resize to target size
             resized = cv2.resize(edges, self.config.TARGET_SIZE)
-            
             return resized
         except Exception as e:
             logger.error(f"Error in image preprocessing: {str(e)}")
@@ -65,7 +55,7 @@ class SignatureMatcher:
             matches = self.bf.knnMatch(des1, des2, k=2)
             good_matches = [
                 m for m, n in matches if m.distance < 0.75 * n.distance
-            ]  # Lowe's ratio test
+            ]
 
             if len(good_matches) < self.config.MIN_MATCHES:
                 return 0.0
@@ -73,6 +63,28 @@ class SignatureMatcher:
             return (len(good_matches) / min(len(kp1), len(kp2))) * 100
         except Exception as e:
             logger.error(f"Error in feature matching: {str(e)}")
+            return 0.0
+
+    def calculate_histogram_similarity(self, img1: np.ndarray, img2: np.ndarray) -> float:
+        """Calculate histogram similarity score"""
+        try:
+            hist1 = cv2.calcHist([img1], [0], None, [256], [0, 256]).flatten()
+            hist2 = cv2.calcHist([img2], [0], None, [256], [0, 256]).flatten()
+            hist1 /= np.sum(hist1)
+            hist2 /= np.sum(hist2)
+            correlation = cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
+            return max(correlation, 0) * 100
+        except Exception as e:
+            logger.error(f"Error in histogram similarity calculation: {str(e)}")
+            return 0.0
+
+    def calculate_ssim_score(self, img1: np.ndarray, img2: np.ndarray) -> float:
+        """Calculate structural similarity score"""
+        try:
+            score = ssim(img1, img2)
+            return score * 100
+        except Exception as e:
+            logger.error(f"Error in SSIM calculation: {str(e)}")
             return 0.0
 
     def calculate_template_score(self, img1: np.ndarray, img2: np.ndarray) -> float:
@@ -85,28 +97,6 @@ class SignatureMatcher:
             logger.error(f"Error in template matching: {str(e)}")
             return 0.0
 
-    def calculate_ssim_score(self, img1: np.ndarray, img2: np.ndarray) -> float:
-        """Calculate structural similarity score"""
-        try:
-            score = ssim(img1, img2)
-            return score * 100
-        except Exception as e:
-            logger.error(f"Error in SSIM calculation: {str(e)}")
-            return 0.0
-
-    def calculate_histogram_similarity(self, img1: np.ndarray, img2: np.ndarray) -> float:
-        """Calculate histogram similarity score"""
-        try:
-            hist1 = cv2.calcHist([img1], [0], None, [256], [0, 256]).flatten()
-            hist2 = cv2.calcHist([img2], [0], None, [256], [0, 256]).flatten()
-            hist1 = hist1 / np.sum(hist1)
-            hist2 = hist2 / np.sum(hist2)
-            cosine_similarity = 1 - cosine(hist1, hist2)
-            return cosine_similarity * 100
-        except Exception as e:
-            logger.error(f"Error in histogram similarity calculation: {str(e)}")
-            return 0.0
-
     def match_signatures(self, img1: np.ndarray, img2: np.ndarray) -> float:
         """Calculate overall signature matching score"""
         try:
@@ -116,9 +106,9 @@ class SignatureMatcher:
 
             # Calculate individual scores
             feature_score = self.calculate_feature_score(proc_img1, proc_img2)
-            template_score = self.calculate_template_score(proc_img1, proc_img2)
-            ssim_score = self.calculate_ssim_score(proc_img1, proc_img2)
             histogram_score = self.calculate_histogram_similarity(proc_img1, proc_img2)
+            ssim_score = self.calculate_ssim_score(proc_img1, proc_img2)
+            template_score = self.calculate_template_score(proc_img1, proc_img2)
 
             if feature_score < self.config.MIN_FEATURE_SCORE:
                 return 0.0
@@ -126,9 +116,9 @@ class SignatureMatcher:
             # Calculate combined score
             combined_score = (
                 self.config.FEATURE_WEIGHT * feature_score +
-                self.config.TEMPLATE_WEIGHT * template_score +
                 self.config.SSIM_WEIGHT * ssim_score +
-                self.config.HISTOGRAM_WEIGHT * histogram_score
+                self.config.HISTOGRAM_WEIGHT * histogram_score +
+                self.config.TEMPLATE_WEIGHT * template_score
             )
 
             return min(combined_score, 100)
